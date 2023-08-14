@@ -2,209 +2,316 @@ package tlbin
 
 import (
 	"encoding/binary"
-	"io"
+	"errors"
+	"fmt"
 	"math"
+	"math/big"
 )
 
-// PeekID returns next type id in Buffer, but does not consume it.
-func (b *Buffer) PeekID() (uint32, error) {
-	if len(b.Buf) < Word {
-		return 0, io.ErrUnexpectedEOF
-	}
-	v := binary.LittleEndian.Uint32(b.Buf)
-	return v, nil
+type DecodeBuf struct {
+	buf  []byte
+	off  int
+	size int
+	err  error
 }
 
-// PeekN returns n bytes from Buffer to target, but does not consume it.
-//
-// Returns io.ErrUnexpectedEOF if buffer contains less that n bytes.
-// Expects that len(target) >= n.
-func (b *Buffer) PeekN(target []byte, n int) error {
-	if len(b.Buf) < n {
-		return io.ErrUnexpectedEOF
-	}
-	copy(target, b.Buf[:n])
-	return nil
+func NewDecodeBuf(b []byte) *DecodeBuf {
+	return &DecodeBuf{b, 0, len(b), nil}
 }
 
-// ID decodes type id from Buffer.
-func (b *Buffer) ID() (uint32, error) {
-	return b.Uint32()
+func (m *DecodeBuf) GetOffset() int {
+	return m.off
 }
 
-// Uint32 decodes unsigned 32-bit integer from Buffer.
-func (b *Buffer) Uint32() (uint32, error) {
-	v, err := b.PeekID()
-	if err != nil {
-		return 0, err
-	}
-	b.Buf = b.Buf[Word:]
-	return v, nil
+func (m *DecodeBuf) GetSize() int {
+	return m.size
 }
 
-// Uint64 decodes 64-bit unsigned integer from Buffer.
-func (b *Buffer) Uint64() (uint64, error) {
-	const size = Word * 2
-	if len(b.Buf) < size {
-		return 0, io.ErrUnexpectedEOF
-	}
-	v := binary.LittleEndian.Uint64(b.Buf)
-	b.Buf = b.Buf[size:]
-	return v, nil
+func (m *DecodeBuf) GetError() error {
+	return m.err
 }
 
-// Int32 decodes signed 32-bit integer from Buffer.
-func (b *Buffer) Int32() (int32, error) {
-	v, err := b.Uint32()
-	if err != nil {
-		return 0, err
-	}
-	return int32(v), nil
+func (m *DecodeBuf) SetError(err error) {
+	m.err = err
 }
 
-// ConsumeN consumes n bytes from buffer, writing them to target.
-//
-// Returns io.ErrUnexpectedEOF if buffer contains less that n bytes.
-// Expects that len(target) >= n.
-func (b *Buffer) ConsumeN(target []byte, n int) error {
-	if err := b.PeekN(target, n); err != nil {
-		return err
+func (m *DecodeBuf) Long() int64 {
+	if m.err != nil {
+		return 0
 	}
-	b.Buf = b.Buf[n:]
-	return nil
+	if m.off+8 > m.size {
+		m.err = errors.New("DecodeLong")
+		return 0
+	}
+	x := int64(binary.LittleEndian.Uint64(m.buf[m.off : m.off+8]))
+	m.off += 8
+	return x
 }
 
-// Bool decodes bare boolean from Buffer.
-func (b *Buffer) Bool() (bool, error) {
-	v, err := b.PeekID()
-	if err != nil {
-		return false, err
+func (m *DecodeBuf) Double() float64 {
+	if m.err != nil {
+		return 0
 	}
-	switch v {
-	case TypeTrue:
-		b.Buf = b.Buf[Word:]
-		return true, nil
-	case TypeFalse:
-		b.Buf = b.Buf[Word:]
-		return false, nil
-	default:
-		return false, NewUnexpectedID(v)
+	if m.off+8 > m.size {
+		m.err = errors.New("DecodeDouble")
+		return 0
 	}
+	x := math.Float64frombits(binary.LittleEndian.Uint64(m.buf[m.off : m.off+8]))
+	m.off += 8
+	return x
 }
 
-// ConsumeID decodes type id from Buffer. If id differs from provided,
-// the *UnexpectedIDErr{ID: gotID} will be returned and buffer will be
-// not consumed.
-func (b *Buffer) ConsumeID(id uint32) error {
-	v, err := b.PeekID()
-	if err != nil {
-		return err
+func (m *DecodeBuf) Int() int32 {
+	if m.err != nil {
+		return 0
 	}
-	if v != id {
-		return NewUnexpectedID(v)
+	if m.off+4 > m.size {
+		m.err = errors.New("DecodeInt")
+		return 0
 	}
-	b.Buf = b.Buf[Word:]
-	return nil
+	x := binary.LittleEndian.Uint32(m.buf[m.off : m.off+4])
+	m.off += 4
+	return int32(x)
 }
 
-// VectorHeader decodes vector length from Buffer.
-func (b *Buffer) VectorHeader() (int, error) {
-	if err := b.ConsumeID(TypeVector); err != nil {
-		return 0, err
+func (m *DecodeBuf) UInt() uint32 {
+	if m.err != nil {
+		return 0
 	}
-	n, err := b.Int()
-	if err != nil {
-		return 0, err
+	if m.off+4 > m.size {
+		m.err = errors.New("DecodeUInt")
+		return 0
 	}
-	if n < 0 {
-		return 0, &InvalidLengthError{
-			Length: n,
-			Where:  "vector",
+	x := binary.LittleEndian.Uint32(m.buf[m.off : m.off+4])
+	m.off += 4
+	return x
+}
+
+func (m *DecodeBuf) Bytes(size int) []byte {
+	if m.err != nil {
+		return nil
+	}
+	if m.off+size > m.size {
+		m.err = errors.New("DecodeBytes")
+		return nil
+	}
+	x := make([]byte, size)
+	copy(x, m.buf[m.off:m.off+size])
+	m.off += size
+	return x
+}
+
+func (m *DecodeBuf) StringBytes() []byte {
+	if m.err != nil {
+		return nil
+	}
+	var size, padding int
+
+	if m.off+1 > m.size {
+		m.err = errors.New("DecodeStringBytes")
+		return nil
+	}
+	size = int(m.buf[m.off])
+	m.off++
+	padding = (4 - ((size + 1) % 4)) & 3
+	if size == 254 {
+		if m.off+3 > m.size {
+			m.err = errors.New("DecodeStringBytes")
+			return nil
 		}
+		size = int(m.buf[m.off]) | int(m.buf[m.off+1])<<8 | int(m.buf[m.off+2])<<16
+		m.off += 3
+		padding = (4 - size%4) & 3
 	}
-	return n, nil
+
+	if m.off+size > m.size {
+		m.err = fmt.Errorf("DecodeStringBytes - Wrong size, (%d, %d, %d)", m.off, size, m.size)
+		return nil
+	}
+	x := make([]byte, size)
+	copy(x, m.buf[m.off:m.off+size])
+	m.off += size
+
+	if m.off+padding > m.size {
+		m.err = errors.New("DecodeStringBytes: Wrong padding")
+		return nil
+	}
+	m.off += padding
+
+	return x
 }
 
-// String decodes string from Buffer.
-func (b *Buffer) String() (string, error) {
-	n, v, err := decodeString(b.Buf)
+func (m *DecodeBuf) String() string {
+	b := m.StringBytes()
+	if m.err != nil {
+		return ""
+	}
+	x := string(b)
+	return x
+}
+
+func (m *DecodeBuf) BigInt() *big.Int {
+	b := m.StringBytes()
+	if m.err != nil {
+		return nil
+	}
+	y := make([]byte, len(b)+1)
+	y[0] = 0
+	copy(y[1:], b)
+	x := new(big.Int).SetBytes(y)
+	return x
+}
+
+func (m *DecodeBuf) VectorInt() []int32 {
+	constructor := m.Int()
+	if m.err != nil {
+		return nil
+	}
+	if constructor != int32(481674261) {
+		m.err = fmt.Errorf("DecodeVectorInt: Wrong constructor (0x%08x)", constructor)
+		return nil
+	}
+	size := m.Int()
+	if m.err != nil {
+		return nil
+	}
+	if size < 0 {
+		m.err = errors.New("DecodeVectorInt: Wrong size")
+		return nil
+	}
+	x := make([]int32, size)
+	i := int32(0)
+	for i < size {
+		y := m.Int()
+		if m.err != nil {
+			return nil
+		}
+		x[i] = y
+		i++
+	}
+	return x
+}
+
+func (m *DecodeBuf) VectorLong() []int64 {
+	constructor := m.Int()
+	if m.err != nil {
+		return nil
+	}
+	if constructor != int32(481674261) {
+		m.err = fmt.Errorf("DecodeVectorLong: Wrong constructor (0x%08x)", constructor)
+		return nil
+	}
+	size := m.Int()
+	if m.err != nil {
+		return nil
+	}
+	if size < 0 {
+		m.err = errors.New("DecodeVectorLong: Wrong size")
+		return nil
+	}
+	x := make([]int64, size)
+	i := int32(0)
+	for i < size {
+		y := m.Long()
+		if m.err != nil {
+			return nil
+		}
+		x[i] = y
+		i++
+	}
+	return x
+}
+
+func (m *DecodeBuf) VectorString() []string {
+	constructor := m.Int()
+	if m.err != nil {
+		return nil
+	}
+	if constructor != int32(481674261) {
+		m.err = fmt.Errorf("DecodeVectorString: Wrong constructor (0x%08x)", constructor)
+		return nil
+	}
+	size := m.Int()
+	if m.err != nil {
+		return nil
+	}
+	if size < 0 {
+		m.err = errors.New("DecodeVectorString: Wrong size")
+		return nil
+	}
+	x := make([]string, size)
+	i := int32(0)
+	for i < size {
+		y := m.String()
+		if m.err != nil {
+			return nil
+		}
+		x[i] = y
+		i++
+	}
+	return x
+}
+
+func (m *DecodeBuf) VectorBytes() [][]byte {
+	constructor := m.Int()
+	if m.err != nil {
+		return nil
+	}
+	if constructor != int32(481674261) {
+		m.err = fmt.Errorf("DecodeVectorBytes: Wrong constructor (0x%08x)", constructor)
+		return nil
+	}
+	size := m.Int()
+	if m.err != nil {
+		return nil
+	}
+	if size < 0 {
+		m.err = errors.New("DecodeVectorBytes: Wrong size")
+		return nil
+	}
+	x := make([][]byte, size)
+	i := int32(0)
+	for i < size {
+		y := m.StringBytes()
+		if m.err != nil {
+			return nil
+		}
+		x[i] = y
+		i++
+	}
+	return x
+}
+
+func (m *DecodeBuf) Bool() bool {
+	constructor := m.Int()
+	if m.err != nil {
+		return false
+	}
+	switch constructor {
+	case int32(-1720552011):
+		return true
+	case int32(-1132882121):
+		return false
+	}
+	return false
+}
+
+func (m *DecodeBuf) Object() (r TLObject) {
+	classID := m.Int()
+	if m.err != nil {
+		return nil
+	}
+
+	r = NewTLObjectByClassID(classID)
+	if r == nil {
+		m.err = fmt.Errorf("can't find registered classId: %x", uint32(classID))
+		return nil
+	}
+
+	err := r.(TLObject).Decode(m)
 	if err != nil {
-		return "", err
+		m.err = fmt.Errorf("object(%x) decode error: %v", uint32(classID), err)
 	}
-	if len(b.Buf) < n {
-		return "", io.ErrUnexpectedEOF
-	}
-	b.Buf = b.Buf[n:]
-	return v, nil
-}
 
-// Bytes decodes byte slice from Buffer.
-//
-// NB: returning value is a copy, it's safe to modify it.
-func (b *Buffer) Bytes() ([]byte, error) {
-	n, v, err := decodeBytes(b.Buf)
-	if err != nil {
-		return nil, err
-	}
-	if len(b.Buf) < n {
-		return nil, io.ErrUnexpectedEOF
-	}
-	b.Buf = b.Buf[n:]
-	return append([]byte(nil), v...), nil
-}
-
-// Int decodes integer from Buffer.
-func (b *Buffer) Int() (int, error) {
-	v, err := b.Int32()
-	if err != nil {
-		return 0, err
-	}
-	return int(v), nil
-}
-
-// Double decodes 64-bit floating point from Buffer.
-func (b *Buffer) Double() (float64, error) {
-	v, err := b.Long()
-	if err != nil {
-		return 0, err
-	}
-	return math.Float64frombits(uint64(v)), nil
-}
-
-// Int53 decodes 53-bit signed integer from Buffer.
-func (b *Buffer) Int53() (int64, error) {
-	return b.Long()
-}
-
-// Long decodes 64-bit signed integer from Buffer.
-func (b *Buffer) Long() (int64, error) {
-	v, err := b.Uint64()
-	if err != nil {
-		return 0, err
-	}
-	return int64(v), nil
-}
-
-// Int128 decodes 128-bit signed integer from Buffer.
-func (b *Buffer) Int128() (Int128, error) {
-	v := Int128{}
-	size := len(v)
-	if len(b.Buf) < size {
-		return Int128{}, io.ErrUnexpectedEOF
-	}
-	copy(v[:size], b.Buf[:size])
-	b.Buf = b.Buf[size:]
-	return v, nil
-}
-
-// Int256 decodes 256-bit signed integer from Buffer.
-func (b *Buffer) Int256() (Int256, error) {
-	v := Int256{}
-	size := len(v)
-	if len(b.Buf) < size {
-		return Int256{}, io.ErrUnexpectedEOF
-	}
-	copy(v[:size], b.Buf[:size])
-	b.Buf = b.Buf[size:]
-	return v, nil
+	return
 }
